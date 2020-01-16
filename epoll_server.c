@@ -86,39 +86,30 @@ int main(void)
 	
 	printf("Set socket noblock success!\n");
 
-	iRet = EpollCreate(&g_iEpollFd);
-	if (iRet != SUCCESS)
+	iRet = InitConnectionPool(1000);
+	if (iRet < 0)
 	{
-		printf("Create epoll fd failed!\n");
-		close(g_iEpollFd);
-		close(g_iSockFd);
-		return FAILED;
+		printf("Init user connection failed.\n");
+		return 0;
 	}
-	
-	printf("Create epoll fd success, g_iEpollFd: %d, g_iSockFd: %d\n", g_iEpollFd, g_iSockFd);
+	printf("Init connection success.\n");
 
-	iRet = EpollControl(g_iSockFd, g_iEpollFd, &g_stEpollSetEvent);
-	if (iRet != SUCCESS)
-	{
-		printf("Epoll ctl failed!\n");
-		close(g_iEpollFd);
-		close(g_iSockFd);
-		return FAILED;
-	}
-	
-	printf("Epoll ctl success!\n");
 	printf("Server init success, now working...\n");
 	printf("###################################\n");
-
-	iRet = EpollCycle(g_iEpollFd, g_iSockFd, g_pstEpollWaitEvents, MAX_EPOLL_EVENTS);
-	if (iRet != SUCCESS)
+	int iEpollFd = InitEpoll(1024, g_iSockFd);
+	if (iEpollFd < 0)
 	{
-		printf("Epoll ctl failed!\n");
-		close(g_iEpollFd);
-		close(g_iSockFd);
-		return FAILED;
+		printf("Create epoll failed.\n");
+		return -1;
 	}
-	
+	printf("Create epoll success, iEpollFd: %d.\n", iEpollFd);
+	HandleServerWork(g_iSockFd, iEpollFd, 1024);
+
+	printf("Server work end.\n");
+	DestoryConnection();
+	close(g_iSockFd);
+	close(iEpollFd);
+
 	printf("###################################\n");
 	printf("Server stop success.\n");
 	return SUCCESS;

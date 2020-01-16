@@ -42,7 +42,7 @@ int SocketServerBindAndListen(int iSockFd, int iPort)
 		return FAILED;
 	}
 	
-	iRet = listen(iSockFd, 20);
+	iRet = listen(iSockFd, 20000);
 	if (iRet < 0)
 	{
 		printf("Listen socket fd(%d) failed! errorno: %d, error: %s\n", iSockFd, errno, strerror(errno));
@@ -176,118 +176,335 @@ int SocketConnectServer(int iSockFd, int iPort, const char* const pscAddr)
 	return SUCCESS;
 }
 
-int EpollCreate(int* const piEpollFd)
+struct USER_CONNECTION {
+	struct epoll_event m_tEvent;
+	int m_iFd;
+	int m_iInUse;
+	int (*m_pfHandle)(int, struct USER_CONNECTION*);
+	struct USER_CONNECTION* m_pNext;
+};
+
+struct CONNECTION_POOL {
+	struct USER_CONNECTION* m_pAllUserConnection;
+	struct USER_CONNECTION* m_pUnusedUserConnection;
+	int m_iSize;
+};
+
+struct CONNECTION_POOL* g_pConnectionPool = NULL;
+
+#define NOT_USED 0
+#define USED     1
+
+int InitConnectionPool(int iSize)
 {
-	int iEpollFd = epoll_create(MAX_EPOLL_EVENTS);
-	if (iEpollFd < 0)
+	if (iSize < 0)
 	{
-		printf("Create epoll fd failed! errorno: %d, error: %s\n", errno, strerror(errno));
-		return FAILED;
+		return -1;
+	}
+	struct USER_CONNECTION* pAllUserConnection = (struct USER_CONNECTION*)malloc(iSize * sizeof(USER_CONNECTION));
+	if (NULL == pAllUserConnection)
+	{
+		printf("Malloc user connection failed, error: [%d][%s].\n", errno, strerror(errno));
+		return -1;
 	}
 
-	*piEpollFd = iEpollFd;
-	return SUCCESS;
+	memset(pAllUserConnection, 0, iSize * sizeof(USER_CONNECTION));
+
+	for(int i = 0; i < iSize - 1; i++)
+	{
+		pAllUserConnection[i].m_iInUse = NOT_USED;
+		pAllUserConnection[i].m_pNext = &pAllUserConnection[i + 1];
+	}
+
+	pAllUserConnection[iSize - 1].m_iInUse = NOT_USED;
+	pAllUserConnection[iSize - 1].m_pNext = NULL;
+
+	g_pConnectionPool = (struct CONNECTION_POOL*)malloc(sizeof(struct CONNECTION_POOL) * 1);
+	if (NULL == g_pConnectionPool)
+	{
+		printf("Malloc connection pool failed, error: [%d][%s].\n", errno, strerror(errno));
+		return -1;
+	}
+
+	g_pConnectionPool->m_iSize = iSize;
+	g_pConnectionPool->m_pAllUserConnection = pAllUserConnection;
+	g_pConnectionPool->m_pUnusedUserConnection = pAllUserConnection;
+	return 0;
 }
 
-int EpollControl(int iSockFd, int iEpollFd, struct epoll_event* const pstEpollEvent)
+struct USER_CONNECTION* GetUserConnection()
 {
-	if (iSockFd < 0 || iEpollFd < 0)
+	int iRet = 0;
+	if (NULL == g_pConnectionPool || NULL == g_pConnectionPool->m_pAllUserConnection)
 	{
-		printf("Set epoll ctl failed! param is error.\n");
-		return FAILED;
+		iRet = InitConnectionPool(1000);
+		if (iRet < 0)
+		{
+			printf("Init user connection failed.\n");
+			return NULL;
+		}
 	}
-	
-	pstEpollEvent->data.fd = iSockFd;
-	pstEpollEvent->events = EPOLLIN;
-	
-	int iRet = epoll_ctl(iEpollFd, EPOLL_CTL_ADD, iSockFd, pstEpollEvent);
+
+	if (NULL == g_pConnectionPool->m_pUnusedUserConnection)
+	{
+		printf("[Error] There is no more connection can be use.\n");
+		return NULL;
+	}
+
+	struct USER_CONNECTION* ptGetConnection = g_pConnectionPool->m_pUnusedUserConnection;
+	g_pConnectionPool->m_pUnusedUserConnection = g_pConnectionPool->m_pUnusedUserConnection->m_pNext;
+
+	ptGetConnection->m_iInUse = USED;
+
+	return ptGetConnection;
+}
+
+void ReturnConnection(struct USER_CONNECTION* pConnection)
+{
+	struct USER_CONNECTION* ptUnUsedConnection = g_pConnectionPool->m_pUnusedUserConnection;
+	pConnection->m_iInUse = NOT_USED;
+	close(pConnection->m_iFd);
+
+	g_pConnectionPool->m_pUnusedUserConnection = pConnection;
+	g_pConnectionPool->m_pUnusedUserConnection->m_pNext = ptUnUsedConnection;
+}
+
+void DestoryConnection()
+{
+	if (NULL == g_pConnectionPool)
+	{
+		return;
+	}
+
+	if (NULL != g_pConnectionPool->m_pAllUserConnection)
+	{
+		//for(struct USER_CONNECTION* pConnection = g_pConnectionPool->m_pUsedUserConnection; pConnection != NULL; pConnection = pConnection->m_pNext)
+		for(int i = 0; i < g_pConnectionPool->m_iSize; i++)
+		{
+			if (USED == g_pConnectionPool->m_pAllUserConnection->m_iInUse)
+			{
+				close(g_pConnectionPool->m_pAllUserConnection->m_iFd);
+			}
+		}
+
+		free(g_pConnectionPool->m_pAllUserConnection);
+		g_pConnectionPool->m_pAllUserConnection = NULL;
+	}
+
+	delete g_pConnectionPool;
+	g_pConnectionPool = NULL;
+}
+
+
+long g_ServerHandleClient = 0;
+
+int AddEpollEvent(int iEpollFd, struct USER_CONNECTION* ptConnection)
+{
+	int iRet = epoll_ctl(iEpollFd, EPOLL_CTL_ADD, ptConnection->m_iFd, &ptConnection->m_tEvent);
 	if (iRet < 0)
 	{
-		printf("Epoll ctl failed! iEpollFd: %d, iSockFd: %d errorno: %d, error: %s\n", iEpollFd, iSockFd, errno, strerror(errno));
-		return FAILED;
+		printf("Epoll add failed, iEpollFd: %d, clinetFd: %d, error: [%d][%s].\n", iEpollFd, ptConnection->m_tEvent.data.fd, errno, strerror(errno));
+		return iRet;
 	}
-	return SUCCESS;
+	return 0;
 }
 
-int EpollGetClient(int iEpollFd, int iServerSockFd)
+int DelEpollEvent(int iEpollFd, struct USER_CONNECTION* ptConnection)
+{
+	int iRet = epoll_ctl(iEpollFd, EPOLL_CTL_DEL, ptConnection->m_iFd, &ptConnection->m_tEvent);
+	if (iRet < 0)
+	{
+		printf("Epoll add event failed, error: [%d][%s].\n", errno, strerror(errno));
+		return iRet;
+	}
+	return 0;
+}
+
+int ModifyEpollEvent(int iEpollFd, struct USER_CONNECTION* ptConnection)
+{
+	int iRet = epoll_ctl(iEpollFd, EPOLL_CTL_MOD, ptConnection->m_iFd, &ptConnection->m_tEvent);
+	if (iRet < 0)
+	{
+		printf("Epoll add event failed, error: [%d][%s].\n", errno, strerror(errno));
+		return iRet;
+	}
+	return 0;
+}
+
+int WriteClient(int iEpollFd, struct USER_CONNECTION* pConnection);
+
+int ReadClient(int iEpollFd, struct USER_CONNECTION* pConnection)
+{
+	char szBuff[1024] = {0};
+	int iClientSockFd = pConnection->m_iFd;
+	int iRet = read(iClientSockFd, szBuff, sizeof(szBuff));
+	if (iRet < 0)
+	{
+		printf("Read failed, error: [%d][%s].\n", errno, strerror(errno));
+		//close(iClientSockFd);
+		return -1;
+	}
+
+	if (iRet == 0 && strlen(szBuff) == 0)
+	{
+		iRet = DelEpollEvent(iEpollFd, pConnection);
+		if (iRet < 0)
+		{
+			printf("Delete event failed.\n");
+		}
+		ReturnConnection(pConnection);
+		printf("Read client data length is 0, Return one connection.\n");
+	} else {
+		printf("Read client data: %s.\n", szBuff);
+
+		pConnection->m_pfHandle = WriteClient;
+		pConnection->m_tEvent.events = EPOLLOUT; // | EPOLLET;
+		iRet = ModifyEpollEvent(iEpollFd, pConnection);
+		if (iRet < 0)
+		{
+			printf("Modify epoll event failed.\n");
+			//return iRet;
+		}
+		printf("Modify event to write.\n");
+	}
+	return iRet;
+}
+
+int WriteClient(int iEpollFd, struct USER_CONNECTION* pConnection)
+{
+	char szBuff[128] = {0};
+	sprintf(szBuff, "Server Handled client: %ld.", g_ServerHandleClient++);
+	int iRet = write(pConnection->m_iFd, szBuff, strlen(szBuff));
+	if (iRet < 0)
+	{
+		printf("Write failed, error: [%d][%s].\n", errno, strerror(errno));
+		return iRet;
+	}
+
+	//pConnection->m_tEvent.data.ptr = ReadClient;
+#define READ
+#ifdef READ
+	pConnection->m_pfHandle = ReadClient;
+	pConnection->m_tEvent.events = EPOLLIN | EPOLLET;
+	iRet = ModifyEpollEvent(iEpollFd, pConnection);
+	if (iRet < 0)
+	{
+		printf("Modify epoll event failed.\n");
+		//return iRet;
+	}
+	printf("Modify event to read.\n");
+#else
+	iRet = DelEpollEvent(iEpollFd, pConnection);
+	if (iRet < 0)
+	{
+		printf("Modify epoll event failed.\n");
+		//return iRet;
+	}
+	ReturnConnection(pConnection);
+	printf("Return one connection.\n");
+#endif
+	return iRet;
+}
+
+int HandleClientConnect(int iEpollFd, struct USER_CONNECTION* pConnection)
 {
 	int iClientSockFd = 0;
+	struct sockaddr_in tClientAddr;
+	int iClientLen = 0;
+	struct USER_CONNECTION* ptClientConnection = GetUserConnection();
 
-	int iRet = SocketAcceptClient(iServerSockFd, &iClientSockFd);
-	if (iRet != SUCCESS)
-	{
-		printf("Accept socket failed!\n");
-		return FAILED;
-	}
+	int iServerSocketFd = pConnection->m_iFd;
+	iClientSockFd = accept(iServerSocketFd, (struct sockaddr *)&tClientAddr, (socklen_t *)&iClientLen);
 	if (iClientSockFd < 0)
 	{
-		return SUCCESS;
-	}
-	
-	iRet = SocketSetOption(iClientSockFd, O_NONBLOCK);
-	if (iRet != SUCCESS)
-	{
-		printf("Set socket noblock failed!\n");
-		close(iClientSockFd);
-		return FAILED;
-	}
-	
-	struct epoll_event stClientEvent;
-	SET_MEM_ZERO(&stClientEvent, sizeof(stClientEvent));
-	
-	iRet = EpollControl(iClientSockFd, iEpollFd, &stClientEvent);
-	if (iRet != SUCCESS)
-	{
-		close(iClientSockFd);
-		printf("[ERROR]: Epoll ctl failed!\n");
+		printf("Accept failed, error: [%d][%s].\n", errno, strerror(errno));
+		return -1;
 	}
 
-	return SUCCESS;
+	int iRet = 0;
+	if (iClientSockFd != iEpollFd) {
+	int iRet = SocketSetOption(iClientSockFd, O_NONBLOCK);
+		if (iRet < 0)
+		{
+			printf("Set client socket fd failed, error: [%d][%s].\n", errno, strerror(errno));
+			return iRet;
+		}
+	}
+
+	ptClientConnection->m_iFd = iClientSockFd;
+	ptClientConnection->m_pfHandle = ReadClient;
+	ptClientConnection->m_tEvent.data.ptr = ptClientConnection;
+	ptClientConnection->m_tEvent.events = EPOLLIN | EPOLLET;
+	iRet = AddEpollEvent(iEpollFd, ptClientConnection);
+	if (iRet < 0)
+	{
+		printf("Add epoll event failed, error: [%d][%s].\n", errno, strerror(errno));
+		//return iRet;
+	}
+
+	return iRet;
 }
 
-int EpollCycle(int iEpollFd, int iSockFd, struct epoll_event* const pstEpollEvent, int iEpollEventSize)
+int InitEpoll(int iEpollFdNum, int iServerSocketFd)
 {
-	int iEpollGetFds = 0;
-	int iRet = 0, i = 0 ;
-	while (1)
+	int iEpollFd = epoll_create(iEpollFdNum);
+	if (iEpollFd < 0)
 	{
-		iEpollGetFds = epoll_wait(iEpollFd, pstEpollEvent, iEpollEventSize, -1);
-		if (iEpollGetFds < 0)
-		{
-			printf("[Error]: Epoll wait failed! errorno: %d, error: %s\n", errno, strerror(errno));
-			break;
-		}
-		
-		for(i = 0; i < iEpollGetFds; i++)
-		{
-			if (pstEpollEvent[i].data.fd < 0)
-			{
-				continue;
-			}
-			if (iSockFd == pstEpollEvent[i].data.fd)
-			{
-				iRet = EpollGetClient(iEpollFd, iSockFd);
-				if (iRet != SUCCESS)
-				{
-					printf("[ERROR]: Epoll get client[%d] connection failed!\n", i);
-					pstEpollEvent[i].data.fd = -1;
-				}
-				continue;
-			}
-			if (pstEpollEvent[i].events & EPOLLIN)
-			{
-				iRet = SocketRcvData(pstEpollEvent[i].data.fd);
-				if (iRet != SUCCESS)
-				{
-					//printf("[ERROR]: Epoll get client[%d] data failed!\n", i);
-					pstEpollEvent[i].data.fd = -1;
-					close(pstEpollEvent[i].data.fd);
-				}
-				continue;
-			}
-			//other event...
-		}
+		printf("Epoll create failed, error: [%d][%s].\n", errno, strerror(errno));
+		return iEpollFd;
 	}
-	printf("Epoll cycle over. Server exit!\n");
-	return SUCCESS;
+
+	struct USER_CONNECTION* ptConnection = GetUserConnection();
+	ptConnection->m_iFd = iServerSocketFd;
+	ptConnection->m_pfHandle = HandleClientConnect;
+	ptConnection->m_tEvent.data.ptr = ptConnection;
+	ptConnection->m_tEvent.events = EPOLLIN | EPOLLET;
+
+	int iRet = AddEpollEvent(iEpollFd, ptConnection);
+	if (iRet < 0)
+	{
+		printf("Add epoll event failed, iServerSocketFd: %d -- %d, error: [%d][%s].\n", iServerSocketFd, ptConnection->m_tEvent.data.fd, errno, strerror(errno));
+		close(iEpollFd);
+		return iRet;
+	}
+
+	return iEpollFd;
+}
+
+int HandleServerWork(int iServerSocketFd, int iEpollFd, int iMaxEvents)
+{
+	if (iServerSocketFd < 0 || iEpollFd < 0)
+	{
+		return -1;
+	}
+
+	//int iRet = 0;
+	int iEventNum = 0;
+
+	struct epoll_event tGetEpollEvents[200];
+	memset(&tGetEpollEvents, 0, sizeof(struct epoll_event) * 200);
+	struct USER_CONNECTION* pConnection;
+
+	while(1) {
+		iEventNum = epoll_wait(iEpollFd, tGetEpollEvents, iMaxEvents, 0);
+		if (iEventNum < 0)
+		{
+			printf("epoll wake up, iEventNum: %d...\n", iEventNum);
+			continue;
+		}
+
+		for(int i = 0; i < iEventNum; i++)
+		{
+			pConnection = (struct USER_CONNECTION*)tGetEpollEvents[i].data.ptr;
+			pConnection->m_pfHandle(iEpollFd, pConnection);
+			if (pConnection->m_iFd == iServerSocketFd)
+			{
+				printf("This is Server fd.\n");
+				//ReturnConnection(pConnection);
+			}
+			printf("Handle one connection, fd: %d, iEventNum: %d.\n", pConnection->m_iFd, iEventNum);
+		}
+
+	}
+	return 0;
 }

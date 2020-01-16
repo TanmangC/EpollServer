@@ -36,13 +36,48 @@ int SocketSendData(int iSockFd, const char* const pscData, int iDataSize);
 
 int SocketConnectServer(int iSockFd, int iPort, const char* const pscAddr);
 
-int EpollCreate(int* const piEpollFd);
+struct USER_CONNECTION {
+	struct epoll_event m_tEvent;
+	int m_iFd;
+	int m_iInUse;
+	int (*m_pfHandle)(int, struct USER_CONNECTION*);
+	struct USER_CONNECTION* m_pNext;
+};
 
-int EpollControl(int iSockFd, int iEpollFd, struct epoll_event* const pstEpollEvent);
+struct CONNECTION_POOL {
+	struct USER_CONNECTION* m_pAllUserConnection;
+	struct USER_CONNECTION* m_pUnusedUserConnection;
+	int m_iSize;
+};
 
-int EpollGetClient(int iEpollFd, int iServerSockFd);
+extern struct CONNECTION_POOL* g_pConnectionPool;
 
-int EpollCycle(int iEpollFd, int iSockFd, struct epoll_event* const pstEpollEvent, int iEpollEventSize);
+#define NOT_USED 0
+#define USED     1
+
+int InitConnectionPool(int iSize);
+
+struct USER_CONNECTION* GetUserConnection();
+
+void ReturnConnection(struct USER_CONNECTION* pConnection);
+
+void DestoryConnection();
+
+int AddEpollEvent(int iEpollFd, struct USER_CONNECTION* ptConnection);
+
+int DelEpollEvent(int iEpollFd, struct USER_CONNECTION* ptConnection);
+
+int ModifyEpollEvent(int iEpollFd, struct USER_CONNECTION* ptConnection);
+
+int WriteClient(int iEpollFd, struct USER_CONNECTION* pConnection);
+
+int ReadClient(int iEpollFd, struct USER_CONNECTION* pConnection);
+
+int HandleClientConnect(int iEpollFd, struct USER_CONNECTION* pConnection);
+
+int InitEpoll(int iEpollFdNum, int iServerSocketFd);
+
+int HandleServerWork(int iServerSocketFd, int iEpollFd, int iMaxEvents);
 
 #endif
 
