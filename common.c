@@ -175,26 +175,6 @@ int SocketConnectServer(int iSockFd, int iPort, const char* const pscAddr)
 	
 	return SUCCESS;
 }
-
-struct USER_CONNECTION {
-	struct epoll_event m_tEvent;
-	int m_iFd;
-	int m_iInUse;
-	int (*m_pfHandle)(int, struct USER_CONNECTION*);
-	struct USER_CONNECTION* m_pNext;
-};
-
-struct CONNECTION_POOL {
-	struct USER_CONNECTION* m_pAllUserConnection;
-	struct USER_CONNECTION* m_pUnusedUserConnection;
-	int m_iSize;
-};
-
-struct CONNECTION_POOL* g_pConnectionPool = NULL;
-
-#define NOT_USED 0
-#define USED     1
-
 int InitConnectionPool(int iSize)
 {
 	if (iSize < 0)
@@ -330,8 +310,6 @@ int ModifyEpollEvent(int iEpollFd, struct USER_CONNECTION* ptConnection)
 	}
 	return 0;
 }
-
-int WriteClient(int iEpollFd, struct USER_CONNECTION* pConnection);
 
 int ReadClient(int iEpollFd, struct USER_CONNECTION* pConnection)
 {
